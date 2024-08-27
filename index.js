@@ -3,6 +3,7 @@ const app=express();
 const cors= require('cors'); 
 const jwt =require('jsonwebtoken')
 require('dotenv').config()
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000
 
 
@@ -38,7 +39,7 @@ async function run() {
     const userCollection = client.db("tourismDb").collection("users");
     const spotCollection = client.db("tourismDb").collection("tourist");
     const cartCollection = client.db("tourismDb").collection("carts");
-  
+    const paymentCollection = client.db("bistroDb").collection("payments");
     
 // jwt  related api
 
@@ -167,9 +168,27 @@ app.get('/tourist/:id', async (req, res) => {
 
 
 app.post('/tourist',verifyToken,verifyTAdmin,async(req,res)=>{
-  const spot=req.body;
-  const result=await spotCollection.insertOne(spot)
+  const list=req.body;
+  const result=await spotCollection.insertOne(list)
   res.send(result);
+})
+
+app.patch('/tourist/:id',async(req,res)=>{
+const list =req.body;
+const id=req.params.id;
+const filter={_id: new ObjectId(id)}
+const  updatedDoc={
+  $set:{
+    tourist_spot_name:list.tourist_spot_name,
+    location:list.location,
+    category:list.category,
+    average_cost:list.average_cost,
+    description:list.description,
+    image:list.image,
+  }
+}
+const result=await spotCollection.updateOne(filter,updatedDoc)
+res.send(result);
 })
 
 app.delete('/tourist/:id' ,verifyToken,verifyTAdmin,async(req,res)=>{
@@ -189,6 +208,12 @@ app.get('/carts',async(req,res)=>{
   res.send(result);
 });
 
+app.post('/carts',async(req,res)=>{
+  const cartItem=req.body;
+  const result=await cartCollection.insertOne(cartItem)
+  res.send(result);
+})
+
 app.delete('/carts/:id',async(req,res)=>{
   const id=req.params.id;
   const query={_id: new ObjectId(id)}
@@ -197,11 +222,93 @@ app.delete('/carts/:id',async(req,res)=>{
 })
 
 
-app.post('/carts',async(req,res)=>{
-  const cartItem=req.body;
-  const result=await cartCollection.insertOne(cartItem)
+//payment intent 
+app.post('/create-payment-intent', async (req, res) => {
+  const { average_cost} = req.body;
+  const amount = parseInt(average_cost* 100);
+  console.log(amount, 'amount inside the intent')
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: amount,
+    currency: 'usd',
+    payment_method_types: ['card']
+  });
+
+  res.send({
+    clientSecret: paymentIntent.client_secret
+  })
+});
+
+
+
+app.get('/payments/:email', verifyToken, async (req, res) => {
+  const query = { email: req.params.email }
+  if (req.params.email !== req.decoded.email) {
+    return res.status(403).send({ message: 'forbidden access' });
+  }
+  const result = await paymentCollection.find(query).toArray();
   res.send(result);
 })
+
+
+
+
+app.post('/payments', async (req, res) => {
+  const payment = req.body;
+  const paymentResult = await paymentCollection.insertOne(payment);
+
+  //  carefully delete each item from the cart
+  console.log('payment info', payment);
+  const query = {
+    _id: {
+      $in: payment.cartIds.map(id => new ObjectId (id))
+    }
+  };
+
+  const deleteResult = await cartCollection.deleteMany(query);
+
+  res.send({ paymentResult, deleteResult });
+})
+
+
+// stats or analytics 
+
+app.get('/admin-stats', verifyToken,verifyTAdmin, async(req,res)=>{
+  const users=await userCollection.estimatedDocumentCount();
+const pakageLists=await  spotCollection.estimatedDocumentCount();
+const bookings=await paymentCollection.estimatedDocumentCount();
+
+// const payments= await paymentCollection.find().toArray()
+// const revenue=payments.reduce((total,payment)=> total +(payment.average_cost),0)
+
+
+const result= await paymentCollection.aggregate([
+  {
+    $group:{
+      _id:null,
+      totalRevenue:{
+        $sum:'$average_cost'
+      }
+    }
+  }
+
+]).toArray();
+
+const revenue= result.length >0 ? result[0].totalRevenue : 0;
+
+  res.send({
+    users,
+    pakageLists,
+    bookings,
+    revenue,
+  })
+
+
+})
+
+
+
+
 
 
     // Send a ping to confirm a successful connection
